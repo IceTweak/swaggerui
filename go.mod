@@ -1,3 +1,3 @@
-module github.com/flowchartsman/swaggerui
+module github.com/IceTweak/swaggerui
 
-go 1.16
+go 1.23.9
