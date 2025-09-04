@@ -2,7 +2,6 @@ package swaggerui
 
 import (
 	"embed"
-	"errors"
 	"io"
 	"io/fs"
 	"net/http"
@@ -11,7 +10,6 @@ import (
 )
 
 //go:generate go run generate.go
-
 //go:embed embed
 var swagfs embed.FS
 
@@ -19,61 +17,66 @@ var swagfs embed.FS
 // Этот обработчик не зависит от пути и предназначен для использования
 // с http.StripPrefix, чтобы его можно было смонтировать на любой URL.
 func Handler(spec []byte) http.Handler {
-	// Получаем доступ к встроенным статическим файлам
 	staticFS, _ := fs.Sub(swagfs, "embed")
 
-	// Создаем новый мультиплексор (мини-роутер) для нашего хендлера.
-	// Это позволяет легко разделить обработку /swagger_spec и статики.
-	mux := http.NewServeMux()
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Очищаем путь
+		urlPath := path.Clean(r.URL.Path)
 
-	// 1. Регистрируем обработчик для файла спецификации OpenAPI
-	specPath := "/" + "spec"
-	mux.HandleFunc(specPath, func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write(spec)
-	})
+		// Убираем ведущий слеш для работы с embedded FS
+		filePath := strings.TrimPrefix(urlPath, "/")
 
-	// 2. Регистрируем обработчик для всех остальных путей (статика)
-	staticHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// http.StripPrefix уже удалил базовый путь,
-		// поэтому r.URL.Path содержит путь к файлу относительно корня Swagger UI.
-		filePath := path.Clean(strings.TrimPrefix(r.URL.Path, "/"))
+		// Обработка специального пути для спецификации
+		if filePath == "spec" {
+			w.Header().Set("Content-Type", "application/json")
+			w.Write(spec)
+			return
+		}
 
-		// Если путь пустой (запрос к корню, например /docs/),
-		// то отдаем index.html
-		if filePath == "" || filePath == "." {
+		// Если путь пустой, отдаем index.html
+		if filePath == "" {
 			filePath = "index.html"
 		}
 
+		// Пытаемся открыть запрашиваемый файл
 		file, err := staticFS.Open(filePath)
 		if err != nil {
-			// Если файл не найден (например, при обновлении страницы в SPA),
-			// снова пытаемся отдать index.html. Это стандартная практика для SPA.
-			if errors.Is(err, fs.ErrNotExist) {
+			// Если файл не найден и это не JS/CSS, пытаемся отдать index.html (для SPA)
+			if !strings.HasSuffix(filePath, ".js") &&
+				!strings.HasSuffix(filePath, ".css") &&
+				!strings.HasSuffix(filePath, ".png") {
 				file, err = staticFS.Open("index.html")
 				if err != nil {
-					http.NotFound(w, r) // Если даже index.html нет, то 404
+					http.NotFound(w, r)
 					return
 				}
 			} else {
-				http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+				http.NotFound(w, r)
 				return
 			}
 		}
 		defer file.Close()
 
-		info, err := file.Stat()
+		// Получаем информацию о файле
+		stat, err := file.Stat()
 		if err != nil {
 			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 			return
 		}
 
-		// Используем http.ServeContent для корректной обработки заголовков
-		// (Content-Type, ETag, Last-Modified и т.д.)
-		http.ServeContent(w, r, info.Name(), info.ModTime(), file.(io.ReadSeeker))
+		// Устанавливаем правильные заголовки Content-Type
+		switch {
+		case strings.HasSuffix(filePath, ".js"):
+			w.Header().Set("Content-Type", "application/javascript")
+		case strings.HasSuffix(filePath, ".css"):
+			w.Header().Set("Content-Type", "text/css")
+		case strings.HasSuffix(filePath, ".html"):
+			w.Header().Set("Content-Type", "text/html")
+		case strings.HasSuffix(filePath, ".png"):
+			w.Header().Set("Content-Type", "image/png")
+		}
+
+		// Отдаем файл
+		http.ServeContent(w, r, stat.Name(), stat.ModTime(), file.(io.ReadSeeker))
 	})
-
-	mux.Handle("/", staticHandler)
-
-	return mux
 }
